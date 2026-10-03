@@ -127,29 +127,72 @@ async function run() {
 
 $("#loadBtn").onclick = run;
 
-/* ---- realtime ---- */
+/* ---- realtime ----
+ * Each "start" opens its own server-side session so differential state
+ * (spectral flux, onset) never leaks between tabs or stop/restart cycles.
+ * Frames are POSTed strictly in sequence order; a frame is only sent after
+ * the previous response, so late responses cannot overwrite newer data.
+ */
+let rtSession = null, onPageHide = null;
+
+function beaconStop(sid) {
+  if (!sid || !navigator.sendBeacon) return;
+  try {
+    navigator.sendBeacon("/api/realtime/stop",
+      new Blob([JSON.stringify({ session_id: sid })], { type: "application/json" }));
+  } catch (_) { /* noop */ }
+}
+
 $("#micBtn").onclick = async () => {
-  if (stopMic) { stopMic(); stopMic = null; $("#micBtn").textContent = "🎤 开始实时分析"; return; }
+  if (stopMic) {
+    const sid = rtSession;
+    stopMic(); stopMic = null; rtSession = null;
+    if (onPageHide) { window.removeEventListener("pagehide", onPageHide); onPageHide = null; }
+    if (sid) { try { await API.post("/api/realtime/stop", { session_id: sid }); } catch (_) {} }
+    $("#micBtn").textContent = "🎤 开始实时分析";
+    return;
+  }
+  let sessionId = null, seq = 0, sending = false, stopped = false;
   try {
     $("#micBtn").disabled = true;
+    sessionId = (await API.post("/api/realtime/start", {})).session_id;
+    rtSession = sessionId;
     stopMic = await startMic({
       onLevel: (samples) => {
         drawLiveWave($("#liveWave"), samples);
         drawLiveSpectrum($("#liveSpec"), samples);
       },
       onFrame: async (samples, sr) => {
+        if (stopped || rtSession !== sessionId || sending) return;
+        sending = true;
+        const frameSeq = seq++;
         try {
-          const r = await API.post("/api/realtime/analyze", { samples, sr });
+          const r = await API.post("/api/realtime/analyze",
+            { session_id: sessionId, seq: frameSeq, samples, sr });
+          if (stopped || rtSession !== sessionId || r.seq !== frameSeq) return;
           $("#rtPitch").textContent = r.pitch_hz ? r.pitch_hz.toFixed(1) + " Hz" : "--";
           $("#rtNote").textContent = r.note;
           $("#rtLevel").textContent = r.level_db.toFixed(1) + " dB";
           $("#rtOnset").textContent = r.onset > 0.25 ? "●" : (r.onset > 0.1 ? "◐" : "○");
           $("#rtOnset").style.color = r.onset > 0.25 ? "var(--green)" : "var(--text-muted)";
         } catch (_) { /* ignore transient errors */ }
+        finally { sending = false; }
       },
     });
+    onPageHide = () => {
+      stopped = true;
+      if (stopMic) { stopMic(); stopMic = null; }
+      beaconStop(sessionId);
+      rtSession = null;
+    };
+    window.addEventListener("pagehide", onPageHide, { once: true });
     $("#micBtn").textContent = "⏹ 停止实时分析";
-  } catch (e) { toast(e.message, "error"); }
+  } catch (e) {
+    stopped = true;
+    if (stopMic) { stopMic(); stopMic = null; }
+    if (sessionId) { beaconStop(sessionId); rtSession = null; }
+    toast(e.message, "error");
+  }
   finally { $("#micBtn").disabled = false; }
 };
 

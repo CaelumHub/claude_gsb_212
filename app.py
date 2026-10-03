@@ -40,7 +40,8 @@ if _CORS:
     CORS(app)
 
 store = storage.Storage(DATA_DIR)
-rt = realtime.new_analyzer()
+# One isolated analyser per real-time analysis session (per browser tab).
+rt_sessions = realtime.RealtimeSessionManager()
 
 
 # --------------------------------------------------------------------------- #
@@ -693,14 +694,39 @@ def api_file_versions(file_id: str):
 # Realtime
 # --------------------------------------------------------------------------- #
 
+@app.post("/api/realtime/start")
+def api_realtime_start():
+    """Open an isolated real-time analysis session."""
+    return jsonify(session_id=rt_sessions.start())
+
+
+@app.post("/api/realtime/stop")
+def api_realtime_stop():
+    data = request.get_json(force=True, silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not rt_sessions.stop(session_id):
+        return jsonify(error="session not found"), 404
+    return jsonify(ok=True)
+
+
 @app.post("/api/realtime/analyze")
 def api_realtime():
     data = request.get_json(force=True) or {}
+    session_id = data.get("session_id", "")
     samples = data.get("samples", [])
     sr = float(data.get("sr", 44100))
+    try:
+        seq = int(data.get("seq", 0))
+    except (TypeError, ValueError):
+        return jsonify(error="invalid seq"), 400
     if not samples:
         return jsonify(error="empty buffer"), 400
-    result = rt.process(samples, sr)
+    result, stale = rt_sessions.process(session_id, samples, sr, seq)
+    if stale:
+        # Late frame from this session — state must stay in frame order.
+        return jsonify(error="stale frame"), 409
+    if result is None:
+        return jsonify(error="session not found"), 404
     return jsonify(result)
 
 
