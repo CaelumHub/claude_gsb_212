@@ -128,29 +128,51 @@ async function run() {
 $("#loadBtn").onclick = run;
 
 /* ---- realtime ---- */
+let rtSession = null, rtBusy = false;
+
+async function stopRealtime() {
+  if (stopMic) { stopMic(); stopMic = null; }
+  if (rtSession) {
+    const sid = rtSession;
+    rtSession = null;
+    API.del(`/api/realtime/session/${sid}`).catch(() => { /* already gone */ });
+  }
+  $("#micBtn").textContent = "🎤 开始实时分析";
+}
+
 $("#micBtn").onclick = async () => {
-  if (stopMic) { stopMic(); stopMic = null; $("#micBtn").textContent = "🎤 开始实时分析"; return; }
+  if (stopMic) { await stopRealtime(); return; }
   try {
     $("#micBtn").disabled = true;
+    rtSession = (await API.post("/api/realtime/session")).session;
+    rtBusy = false;
     stopMic = await startMic({
       onLevel: (samples) => {
         drawLiveWave($("#liveWave"), samples);
         drawLiveSpectrum($("#liveSpec"), samples);
       },
       onFrame: async (samples, sr) => {
+        // Drop this frame if the previous request is still in flight —
+        // real-time analysis should always process the freshest frame,
+        // never queue stale ones (which is what mixed up frame state).
+        if (rtBusy || !rtSession) return;
+        rtBusy = true;
         try {
-          const r = await API.post("/api/realtime/analyze", { samples, sr });
+          const r = await API.post("/api/realtime/analyze", { samples, sr, session: rtSession });
           $("#rtPitch").textContent = r.pitch_hz ? r.pitch_hz.toFixed(1) + " Hz" : "--";
           $("#rtNote").textContent = r.note;
           $("#rtLevel").textContent = r.level_db.toFixed(1) + " dB";
           $("#rtOnset").textContent = r.onset > 0.25 ? "●" : (r.onset > 0.1 ? "◐" : "○");
           $("#rtOnset").style.color = r.onset > 0.25 ? "var(--green)" : "var(--text-muted)";
         } catch (_) { /* ignore transient errors */ }
+        finally { rtBusy = false; }
       },
     });
     $("#micBtn").textContent = "⏹ 停止实时分析";
-  } catch (e) { toast(e.message, "error"); }
-  finally { $("#micBtn").disabled = false; }
+  } catch (e) {
+    await stopRealtime();
+    toast(e.message, "error");
+  } finally { $("#micBtn").disabled = false; }
 };
 
 (async () => {

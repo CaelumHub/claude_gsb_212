@@ -40,7 +40,7 @@ if _CORS:
     CORS(app)
 
 store = storage.Storage(DATA_DIR)
-rt = realtime.new_analyzer()
+rt_sessions = realtime.SessionManager()
 
 
 # --------------------------------------------------------------------------- #
@@ -693,6 +693,19 @@ def api_file_versions(file_id: str):
 # Realtime
 # --------------------------------------------------------------------------- #
 
+@app.post("/api/realtime/session")
+def api_realtime_session_create():
+    """Start an isolated real-time analysis session; returns its id."""
+    return jsonify({"session": rt_sessions.create()})
+
+
+@app.delete("/api/realtime/session/<sid>")
+def api_realtime_session_close(sid: str):
+    if not rt_sessions.close(sid):
+        return jsonify(error="unknown session"), 404
+    return jsonify(ok=True)
+
+
 @app.post("/api/realtime/analyze")
 def api_realtime():
     data = request.get_json(force=True) or {}
@@ -700,7 +713,15 @@ def api_realtime():
     sr = float(data.get("sr", 44100))
     if not samples:
         return jsonify(error="empty buffer"), 400
-    result = rt.process(samples, sr)
+    sid = data.get("session")
+    if sid is None:
+        # No session: analyse statelessly so callers can never contaminate
+        # each other (differential metrics like flux/onset start at zero).
+        return jsonify(realtime.new_analyzer().process(samples, sr))
+    try:
+        result = rt_sessions.process(sid, samples, sr)
+    except KeyError:
+        return jsonify(error="unknown session"), 404
     return jsonify(result)
 
 
